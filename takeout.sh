@@ -24,12 +24,16 @@ Options:
   --cleanup-extracted      Remove extracted data after successful run
   --keep-archives          Do not move processed archives to <DOWNLOAD_DIR>/_processed
   --photos-root <name>     Override Photos root folder name under Takeout (default: auto: "Google Foto" and "Google Photos")
-  --reset                  Remove extracted data + markers before running (forces re-extract and reprocess)
+  --reset                  Remove extracted data + markers and move archives back from _processed before running
 
 Behavior:
-  - All archives are extracted (OVERLAID) into a single EXTRACT_BASE tree so sidecar JSON can land next to media.
-  - Sidecar metadata applied ONLY when JSON safely maps: "<file>.<ext>.json" -> "<file>.<ext>".
-  - Folder mtime set when a folder contains "metadata.json" (applies to the folder itself).
+  - Archives are extracted (OVERLAID) into a single EXTRACT_BASE tree so sidecar JSON can land next to media.
+  - File sidecar matching (simple deterministic rules):
+      1) "<filename><anything>.json"
+      2) "<basename_without_ext><anything>.json"
+      3) If media is MP4/MOV: try "<basename>.HEIC<anything>.json" (iPhone Live Photos pairing)
+  - Folder metadata: <folder>/metadata.json sets folder mtime.
+  - Rsync shows progress when --verbose is used.
 EOF
 }
 
@@ -42,7 +46,7 @@ progress_done_line() { [ "$VERBOSE" -eq 1 ] && printf "\r\033[K%s\n" "$*"; }
 say() { echo "$*"; }
 
 ###############################################################################
-# ARG PARSING (supports -h before positionals)
+# ARG PARSING
 ###############################################################################
 PHASE="all"
 DRY_RUN=0
@@ -135,17 +139,24 @@ need_cmd rm
 need_cmd mkdir
 
 ###############################################################################
-# RESET (must happen before creating EXTRACT_BASE/MARKER_DIR)
+# RESET
 ###############################################################################
 if [ "$RESET" -eq 1 ]; then
-  # In verbose mode, show a short line
-  progress_line "[reset] removing extracted data..."
-  # Remove the whole extract base if present (includes markers)
+  progress_line "[reset] removing extracted data and restoring archives..."
+
   rm -rf "$EXTRACT_BASE" 2>/dev/null || true
+
+  if [ -d "$PROCESSED_DIR" ]; then
+    shopt -s nullglob
+    for a in "$PROCESSED_DIR"/takeout*.tgz "$PROCESSED_DIR"/Takeout*.tgz "$PROCESSED_DIR"/takeout*.tar.gz "$PROCESSED_DIR"/Takeout*.tar.gz; do
+      mv -f "$a" "$DOWNLOAD_DIR"/ 2>/dev/null || true
+    done
+    shopt -u nullglob
+  fi
+
   progress_done_line "[reset] done"
 fi
 
-# Ensure extraction directories exist after reset
 mkdir -p "$EXTRACT_BASE" "$MARKER_DIR"
 
 ###############################################################################
@@ -167,16 +178,15 @@ log "$RUNINFO_LOG" "RESET=$RESET"
 log "$RUNINFO_LOG" "PHOTOS_ROOT_OVERRIDE=${PHOTOS_ROOT_OVERRIDE:-<auto>}"
 
 ###############################################################################
-# GLOBAL COUNTS (filled by prescan)
+# GLOBAL COUNTS
 ###############################################################################
 ARCHIVE_COUNT=0
-SIDECAR_JSON_COUNT=0
 DIR_METADATA_COUNT=0
 SYNC_SOURCE_COUNT=0
 MEDIA_FILE_COUNT=0
 
 ###############################################################################
-# STEP: EXTRACT (OVERLAY into EXTRACT_BASE)
+# STEP: EXTRACT (OVERLAY) + immediate move to _processed
 ###############################################################################
 do_extract() {
   phase_start "extract"
@@ -216,12 +226,21 @@ do_extract() {
 
     if [ -f "$marker" ]; then
       log "$EXTRACT_LOG" "  SKIP already extracted marker=$marker"
+      if [ "$KEEP_ARCHIVES" -eq 0 ]; then
+        mv -f "$archive" "$PROCESSED_DIR"/ 2>/dev/null || true
+        log "$EXTRACT_LOG" "  MOVED (skip) to processed: $PROCESSED_DIR/$base"
+      fi
       continue
     fi
 
     if tar -xzf "$archive" -C "$EXTRACT_BASE" >> "$EXTRACT_LOG" 2>&1; then
       touch "$marker"
       log "$EXTRACT_LOG" "  OK extracted into EXTRACT_BASE=$EXTRACT_BASE"
+
+      if [ "$KEEP_ARCHIVES" -eq 0 ]; then
+        mv -f "$archive" "$PROCESSED_DIR"/ 2>/dev/null || true
+        log "$EXTRACT_LOG" "  MOVED to processed: $PROCESSED_DIR/$base"
+      fi
     else
       log "$EXTRACT_LOG" "  ERROR extracting archive=$archive"
       progress_done_line "[extract] ERROR (see log)"
@@ -239,15 +258,6 @@ do_extract() {
 do_prescan() {
   phase_start "prescan"
   progress_line "[prescan] scanning extracted tree..."
-
-  SIDECAR_JSON_COUNT="$(
-    find "$EXTRACT_BASE" -type f \( \
-      -iname "*.jpg.json" -o -iname "*.jpeg.json" -o -iname "*.png.json" -o \
-      -iname "*.gif.json" -o -iname "*.heic.json" -o -iname "*.mp4.json" -o \
-      -iname "*.mov.json" -o -iname "*.m4v.json" -o -iname "*.avi.json" -o \
-      -iname "*.webp.json" -o -iname "*.tif.json" -o -iname "*.tiff.json" \
-    \) -print 2>/dev/null | wc -l | tr -d ' '
-  )"
 
   DIR_METADATA_COUNT="$(
     find "$EXTRACT_BASE" -type f -name "metadata.json" -print 2>/dev/null | wc -l | tr -d ' '
@@ -275,26 +285,16 @@ do_prescan() {
   )"
 
   log "$PRESCAN_LOG" "ARCHIVE_COUNT=$ARCHIVE_COUNT"
-  log "$PRESCAN_LOG" "SIDECAR_JSON_COUNT=$SIDECAR_JSON_COUNT"
   log "$PRESCAN_LOG" "DIR_METADATA_COUNT=$DIR_METADATA_COUNT"
   log "$PRESCAN_LOG" "SYNC_SOURCE_COUNT=$SYNC_SOURCE_COUNT"
   log "$PRESCAN_LOG" "MEDIA_FILE_COUNT=$MEDIA_FILE_COUNT"
 
-  {
-    echo "PRESCAN:"
-    echo "  ARCHIVE_COUNT=$ARCHIVE_COUNT"
-    echo "  SIDECAR_JSON_COUNT=$SIDECAR_JSON_COUNT"
-    echo "  DIR_METADATA_COUNT=$DIR_METADATA_COUNT"
-    echo "  SYNC_SOURCE_COUNT=$SYNC_SOURCE_COUNT"
-    echo "  MEDIA_FILE_COUNT=$MEDIA_FILE_COUNT"
-  } >> "$SUMMARY_LOG"
-
-  progress_done_line "[prescan] archives=$ARCHIVE_COUNT sidecar_json=$SIDECAR_JSON_COUNT dir_meta=$DIR_METADATA_COUNT media=$MEDIA_FILE_COUNT sync_roots=$SYNC_SOURCE_COUNT"
+  progress_done_line "[prescan] archives=$ARCHIVE_COUNT dir_meta=$DIR_METADATA_COUNT media=$MEDIA_FILE_COUNT sync_roots=$SYNC_SOURCE_COUNT"
   phase_end "prescan"
 }
 
 ###############################################################################
-# STEP: MTIME FILES (+ report media without sidecar)
+# STEP: MTIME FILES (simple deterministic sidecar rules)
 ###############################################################################
 do_mtime_files() {
   phase_start "mtime-files"
@@ -309,7 +309,6 @@ do_mtime_files() {
   EXTRACT_BASE="$EXTRACT_BASE" \
   MTIME_FILE_LOG="$MTIME_FILE_LOG" \
   UNMATCHED_LOG="$UNMATCHED_LOG" \
-  TOTAL_SIDECAR_JSON="$SIDECAR_JSON_COUNT" \
   TOTAL_MEDIA_FILES="$MEDIA_FILE_COUNT" \
   VERBOSE="$VERBOSE" \
   python3 - <<'PY'
@@ -318,15 +317,9 @@ import os, json, sys, time
 extract_base = os.environ["EXTRACT_BASE"]
 log_file = os.environ["MTIME_FILE_LOG"]
 unmatched = os.environ["UNMATCHED_LOG"]
-total_sidecar = int(os.environ.get("TOTAL_SIDECAR_JSON","0") or "0")
 total_media = int(os.environ.get("TOTAL_MEDIA_FILES","0") or "0")
 verbose = os.environ.get("VERBOSE","0") == "1"
 
-SAFE_SUFFIXES = (
-    ".jpg.json",".jpeg.json",".png.json",".gif.json",".heic.json",
-    ".mp4.json",".mov.json",".m4v.json",".avi.json",".webp.json",
-    ".tif.json",".tiff.json"
-)
 MEDIA_SUFFIXES = (
     ".jpg",".jpeg",".png",".gif",".heic",
     ".mp4",".mov",".m4v",".avi",".webp",
@@ -365,85 +358,23 @@ def pick_timestamp(meta):
                     pass
     return None
 
-# A) Update mtimes for files based on safe sidecar JSON
-if total_sidecar == 0:
-    log("INFO: No sidecar JSON files found (safe patterns). File mtimes will not be updated from sidecars.")
-else:
-    log(f"INFO: Sidecar JSON expected (from prescan) = {total_sidecar}")
+def first_json_with_prefix(dirname: str, prefix: str):
+    try:
+        for cand in os.listdir(dirname):
+            if cand.startswith(prefix) and cand.lower().endswith(".json"):
+                return os.path.join(dirname, cand)
+    except Exception:
+        return None
+    return None
 
-processed_json = 0
+processed = 0
 updated = 0
-missing_media_for_json = 0
+no_sidecar = 0
 bad_json = 0
 no_timestamp = 0
 utime_failed = 0
 
-if total_sidecar > 0:
-    step_json = max(100, total_sidecar // 100)
-else:
-    step_json = 1000
-
-for root, _, files in os.walk(extract_base):
-    for fn in files:
-        lfn = fn.lower()
-        if not lfn.endswith(SAFE_SUFFIXES):
-            continue
-
-        processed_json += 1
-        json_path = os.path.join(root, fn)
-        media_path = json_path[:-5]
-
-        if not os.path.exists(media_path):
-            missing_media_for_json += 1
-            unmatch(f"MISSING_MEDIA_FOR_JSON json={json_path} expected_media={media_path}")
-        else:
-            try:
-                with open(json_path,"r",encoding="utf-8") as f:
-                    meta = json.load(f)
-            except:
-                bad_json += 1
-                unmatch(f"BAD_JSON json={json_path}")
-                meta = None
-
-            if meta is not None:
-                ts = pick_timestamp(meta)
-                if not ts:
-                    no_timestamp += 1
-                    unmatch(f"NO_TIMESTAMP json={json_path}")
-                else:
-                    try:
-                        os.utime(media_path, (ts, ts))
-                        updated += 1
-                    except:
-                        utime_failed += 1
-                        unmatch(f"UTIME_FAILED media={media_path} ts={ts}")
-
-        if processed_json % step_json == 0:
-            if total_sidecar > 0:
-                pct = int(processed_json * 100 / total_sidecar)
-                if pct > 100: pct = 100
-                progress_line(f"[mtime-files:sidecars] {processed_json}/{total_sidecar} ({pct}%) updated={updated}")
-            else:
-                progress_line(f"[mtime-files:sidecars] processed={processed_json} updated={updated}")
-
-if total_sidecar > 0:
-    progress_done(f"[mtime-files:sidecars] done updated={updated} (see logs)")
-
-log(f"SIDECAR_JSON_PROCESSED={processed_json}")
-log(f"UPDATED_FILES_FROM_SIDECAR={updated}")
-log(f"MISSING_MEDIA_FOR_JSON={missing_media_for_json}")
-log(f"BAD_JSON={bad_json}")
-log(f"NO_TIMESTAMP={no_timestamp}")
-log(f"UTIME_FAILED={utime_failed}")
-
-# B) Report media files that have NO sidecar JSON (expected: <media>.<ext>.json)
-media_seen = 0
-media_no_sidecar = 0
-
-if total_media > 0:
-    step_media = max(500, total_media // 100)
-else:
-    step_media = 2000
+step = max(500, total_media // 100) if total_media > 0 else 2000
 
 for root, _, files in os.walk(extract_base):
     for fn in files:
@@ -451,26 +382,70 @@ for root, _, files in os.walk(extract_base):
         if not lfn.endswith(MEDIA_SUFFIXES):
             continue
 
-        media_seen += 1
+        processed += 1
         media_path = os.path.join(root, fn)
-        sidecar_path = media_path + ".json"
 
-        if not os.path.exists(sidecar_path):
-            media_no_sidecar += 1
-            unmatch(f"NO_SIDECAR media={media_path} expected_sidecar={sidecar_path}")
+        dirname = os.path.dirname(media_path)
+        filename = os.path.basename(media_path)                 # includes extension
+        base_no_ext, ext = os.path.splitext(filename)
+        ext_lower = ext.lower()
 
-        if media_seen % step_media == 0:
+        json_path = None
+
+        # 1) "<filename><anything>.json"
+        json_path = first_json_with_prefix(dirname, filename)
+
+        # 2) "<basename_without_ext><anything>.json"
+        if not json_path:
+            json_path = first_json_with_prefix(dirname, base_no_ext)
+
+        # 3) MP4/MOV -> try HEIC
+        if not json_path and ext_lower in (".mp4", ".mov"):
+            json_path = first_json_with_prefix(dirname, base_no_ext + ".HEIC")
+            if not json_path:
+                json_path = first_json_with_prefix(dirname, base_no_ext + ".heic")
+
+        if not json_path:
+            no_sidecar += 1
+            unmatch(f"NO_SIDECAR media={media_path}")
+        else:
+            try:
+                with open(json_path,"r",encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                bad_json += 1
+                unmatch(f"BAD_JSON json={json_path} media={media_path}")
+                meta = None
+
+            if meta is not None:
+                ts = pick_timestamp(meta)
+                if not ts:
+                    no_timestamp += 1
+                    unmatch(f"NO_TIMESTAMP json={json_path} media={media_path}")
+                else:
+                    try:
+                        os.utime(media_path, (ts, ts))
+                        updated += 1
+                    except Exception:
+                        utime_failed += 1
+                        unmatch(f"UTIME_FAILED media={media_path} ts={ts}")
+
+        if processed % step == 0:
             if total_media > 0:
-                pct = int(media_seen * 100 / total_media)
+                pct = int(processed * 100 / total_media)
                 if pct > 100: pct = 100
-                progress_line(f"[mtime-files:nosidecar] {media_seen}/{total_media} ({pct}%) no_sidecar={media_no_sidecar}")
+                progress_line(f"[mtime-files] {processed}/{total_media} ({pct}%) updated={updated} no_sidecar={no_sidecar}")
             else:
-                progress_line(f"[mtime-files:nosidecar] scanned={media_seen} no_sidecar={media_no_sidecar}")
+                progress_line(f"[mtime-files] processed={processed} updated={updated} no_sidecar={no_sidecar}")
 
-progress_done(f"[mtime-files:nosidecar] done scanned={media_seen} no_sidecar={media_no_sidecar}")
+progress_done(f"[mtime-files] done processed={processed} updated={updated} no_sidecar={no_sidecar}")
 
-log(f"MEDIA_FILES_SCANNED={media_seen}")
-log(f"MEDIA_FILES_NO_SIDECAR={media_no_sidecar}")
+log(f"MEDIA_PROCESSED={processed}")
+log(f"UPDATED_MEDIA_FILES={updated}")
+log(f"MEDIA_NO_SIDECAR={no_sidecar}")
+log(f"BAD_JSON={bad_json}")
+log(f"NO_TIMESTAMP={no_timestamp}")
+log(f"UTIME_FAILED={utime_failed}")
 PY
 
   phase_end "mtime-files"
@@ -541,10 +516,7 @@ bad_json = 0
 no_ts = 0
 utime_failed = 0
 
-if total > 0:
-    step = max(50, total // 100)
-else:
-    step = 200
+step = max(50, total // 100) if total > 0 else 200
 
 for root, _, files in os.walk(extract_base):
     if "metadata.json" not in files:
@@ -556,7 +528,7 @@ for root, _, files in os.walk(extract_base):
     try:
         with open(json_path,"r",encoding="utf-8") as f:
             meta = json.load(f)
-    except:
+    except Exception:
         bad_json += 1
         unmatch(f"BAD_DIR_JSON json={json_path}")
         meta = None
@@ -570,7 +542,7 @@ for root, _, files in os.walk(extract_base):
             try:
                 os.utime(root, (ts, ts))
                 updated += 1
-            except:
+            except Exception:
                 utime_failed += 1
                 unmatch(f"DIR_UTIME_FAILED dir={root} ts={ts}")
 
@@ -595,7 +567,7 @@ PY
 }
 
 ###############################################################################
-# STEP: SYNC
+# STEP: SYNC (rsync progress + terminal output in verbose)
 ###############################################################################
 do_sync() {
   phase_start "sync"
@@ -635,31 +607,24 @@ do_sync() {
 
     log "$RSYNC_LOG" "[${n}/${total_sources}] (${pct}%) source=$src"
 
+    RSYNC_OPTS=(-a -v)
+    if [ "$VERBOSE" -eq 1 ]; then
+      RSYNC_OPTS+=(--progress)
+    fi
+
     if [ "$DRY_RUN" -eq 1 ]; then
-      rsync -av --dry-run "${src}/" "${RSYNC_DEST}/" >> "$RSYNC_LOG" 2>&1
+      RSYNC_OPTS+=(--dry-run)
+    fi
+
+    if [ "$VERBOSE" -eq 1 ]; then
+      rsync "${RSYNC_OPTS[@]}" "${src}/" "${RSYNC_DEST}/" 2>&1 | tee -a "$RSYNC_LOG"
     else
-      rsync -av "${src}/" "${RSYNC_DEST}/" >> "$RSYNC_LOG" 2>&1
+      rsync "${RSYNC_OPTS[@]}" "${src}/" "${RSYNC_DEST}/" >> "$RSYNC_LOG" 2>&1
     fi
   done <<< "$sources"
 
   progress_done_line "[sync] done (${total_sources} sources)"
   phase_end "sync"
-}
-
-###############################################################################
-# ARCHIVE HANDLING
-###############################################################################
-move_archives() {
-  if [ "$KEEP_ARCHIVES" -eq 1 ]; then
-    log "$RUNINFO_LOG" "KEEP_ARCHIVES=1 -> not moving archives"
-    return 0
-  fi
-
-  shopt -s nullglob
-  for a in "${DOWNLOAD_DIR}"/takeout*.tgz "${DOWNLOAD_DIR}"/Takeout*.tgz "${DOWNLOAD_DIR}"/takeout*.tar.gz "${DOWNLOAD_DIR}"/Takeout*.tar.gz; do
-    mv -f "$a" "$PROCESSED_DIR"/ 2>/dev/null || true
-  done
-  shopt -u nullglob
 }
 
 ###############################################################################
@@ -678,8 +643,9 @@ case "$PHASE" in
     ;;
 esac
 
-move_archives
-
+###############################################################################
+# CLEANUP
+###############################################################################
 if [ "$CLEANUP_EXTRACTED" -eq 1 ]; then
   log "$RUNINFO_LOG" "Cleanup: removing EXTRACT_BASE=$EXTRACT_BASE"
   rm -rf "$EXTRACT_BASE"
