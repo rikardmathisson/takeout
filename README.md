@@ -26,15 +26,20 @@ Options:
   -h, --help               Show this help
 
   -n, --dry-run            Rsync dry run
-  --phase <name>           extract | prescan | mtime | sync | all   (default: all)
+  --phase <name>           extract | prescan | mtime | normalize | sync | all   (default: all)
   --log-dir <path>         Override log directory (default: <DOWNLOAD_DIR>/_logs/<timestamp>)
   --cleanup-extracted      Remove extracted data after successful run
   --keep-archives          Do not move processed archives to <DOWNLOAD_DIR>/_processed
   --photos-root <name>     Override Photos root folder name under Takeout (default: auto: "Google Foto" and "Google Photos")
-  --reset                  Remove extracted data + markers before running (forces re-extract and reprocess)
+  --delete                 Force removal of files in destination not in source (including .json files which always are excluded)
+  --reset                  Remove extracted data + markers and move archives back from _processed before running
 
 Behavior:
-  - All archives are extracted (OVERLAID) into a single EXTRACT_BASE tree so sidecar JSON can land next to media.
-  - Sidecar metadata applied ONLY when JSON safely maps: "<file>.<ext>.json" -> "<file>.<ext>".
-  - Folder mtime set when a folder contains "metadata.json" (applies to the folder itself).
+  - Archives are extracted (OVERLAID) into a single EXTRACT_BASE tree so sidecar JSON can land next to media.
+  - File sidecar matching (simple deterministic rules):
+      1) "<filename><anything>.json"
+      2) "<basename_without_ext><anything>.json"
+      3) If media is MP4/MOV: try "<basename>.HEIC<anything>.json" (iPhone Live Photos pairing)
+  - Folder metadata: <folder>/metadata.json sets folder mtime.
+  - Rsync shows progress when --verbose is used.
 ```

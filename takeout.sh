@@ -19,11 +19,12 @@ Options:
   -h, --help               Show this help
 
   -n, --dry-run            Rsync dry run
-  --phase <name>           extract | prescan | mtime | sync | all   (default: all)
+  --phase <name>           extract | prescan | mtime | normalize | sync | all   (default: all)
   --log-dir <path>         Override log directory (default: <DOWNLOAD_DIR>/_logs/<timestamp>)
   --cleanup-extracted      Remove extracted data after successful run
   --keep-archives          Do not move processed archives to <DOWNLOAD_DIR>/_processed
   --photos-root <name>     Override Photos root folder name under Takeout (default: auto: "Google Foto" and "Google Photos")
+  --delete                 Force removal of files in destination not in source (including .json files which always are excluded)
   --reset                  Remove extracted data + markers and move archives back from _processed before running
 
 Behavior:
@@ -51,6 +52,7 @@ say() { echo "$*"; }
 PHASE="all"
 DRY_RUN=0
 CLEANUP_EXTRACTED=0
+DELETE=0
 KEEP_ARCHIVES=0
 RESET=0
 LOG_DIR=""
@@ -69,6 +71,7 @@ while [ $# -gt 0 ]; do
     --log-dir) shift; [ $# -gt 0 ] || { echo "ERROR: --log-dir requires a value"; exit 1; }; LOG_DIR="$1" ;;
     --phase) shift; [ $# -gt 0 ] || { echo "ERROR: --phase requires a value"; exit 1; }; PHASE="$1" ;;
     --photos-root) shift; [ $# -gt 0 ] || { echo "ERROR: --photos-root requires a value"; exit 1; }; PHOTOS_ROOT_OVERRIDE="$1" ;;
+    --delete) DELETE=1 ;;
     --) shift; while [ $# -gt 0 ]; do POSITIONALS+=( "$1" ); shift; done; break ;;
     -*) echo "ERROR: Unknown option: $1"; exit 1 ;;
     *) POSITIONALS+=( "$1" ) ;;
@@ -581,6 +584,49 @@ PY
   phase_end "mtime-dirs"
 }
 
+do_normalize_years_to_english() {
+  phase_start "normalize-years"
+
+  # Derive source root consistently (don't rely on RSYNC_SOURCE being set)
+  local source_root="${EXTRACT_BASE}/Takeout/Google Foto"
+
+  if [ ! -d "$source_root" ]; then
+    log "$RUNINFO_LOG" "INFO: source root not found: $source_root (skipping normalize-years)"
+    progress_done_line "[normalize-years] skipped (no Google Foto root)"
+    phase_end "normalize-years"
+    return 0
+  fi
+
+  log "$RUNINFO_LOG" "Normalizing year folders: 'Foton från YYYY' -> 'Photos from YYYY' under: $source_root"
+  progress_line "[normalize-years] scanning..."
+
+  local renamed=0
+  local merged=0
+
+  # Use process substitution to avoid subshell counter issues
+  while IFS= read -r -d '' src; do
+    local year dst
+    year="${src##*Foton från }"
+    dst="${source_root}/Photos from ${year}"
+
+    if [ -d "$dst" ]; then
+      log "$RUNINFO_LOG" "MERGE: $(basename "$src") -> $(basename "$dst")"
+      rsync -a "$src"/ "$dst"/ >> "$SYNC_LOG" 2>&1
+      rm -rf "$src"
+      merged=$((merged+1))
+    else
+      log "$RUNINFO_LOG" "RENAME: $(basename "$src") -> $(basename "$dst")"
+      mv "$src" "$dst"
+      renamed=$((renamed+1))
+    fi
+  done < <(find "$source_root" -maxdepth 1 -type d -name "Foton från [0-9][0-9][0-9][0-9]" -print0)
+
+  progress_done_line "[normalize-years] done renamed=${renamed} merged=${merged}"
+  log "$RUNINFO_LOG" "normalize-years: renamed=${renamed} merged=${merged}"
+
+  phase_end "normalize-years"
+}
+
 ###############################################################################
 # STEP: SYNC (rsync progress + terminal output in verbose)
 ###############################################################################
@@ -623,6 +669,10 @@ do_sync() {
     log "$RSYNC_LOG" "[${n}/${total_sources}] (${pct}%) source=$src"
 
     RSYNC_OPTS=(-a -v --exclude='*.json' --delete-delay)
+
+    if [ "$DELETE" -eq 1 ]; then
+      RSYNC_OPTS+=(--delete --delete-excluded)
+    fi
 
     if [ "$VERBOSE" -eq 1 ]; then
       # Run rsync, log everything, but only show compact "to-check" progress in terminal.
@@ -696,7 +746,8 @@ case "$PHASE" in
   prescan) do_prescan ;;
   mtime) do_prescan; do_mtime_files; do_mtime_dirs ;;
   sync) do_prescan; do_sync ;;
-  all) do_extract; do_prescan; do_mtime_files; do_mtime_dirs; do_sync ;;
+  normalize) do_normalize_years_to_english ;;
+  all) do_extract; do_prescan; do_mtime_files; do_mtime_dirs; do_normalize_years_to_english; do_sync ;;
   *)
     echo "ERROR: Invalid --phase value: $PHASE"
     echo "Allowed: extract | prescan | mtime | sync | all"

@@ -54,8 +54,24 @@ takeout-20260213T163706Z-3-019.tgz
 takeout-20260213T163706Z-3-020.tgz
 ```
 
-3. Därefter skall dessa processas. Till det behöver vi `takeout.sh`. Se mappen scripts på nas, och kör `takeout.sh -h` om du vill veta mer. 
+3. Kopiera dessa till `smb://nas2.localdomain/GooglePhotosTakeout/exported`
+
+4. Logga in på nas:en och gå till `/share/GooglePhotosTakeout`
+
+5. Kör takeout.sh med parametrar för verbose (-v) och städa upp filer som tagits bort (--delete)
 
 ```bash
-./takeout.sh /Users/rikardmathisson/Downloads/takeout-exported '/Volumes/GooglePhotosTakeout/Takeout/Google Foto' -v
+./script/takeout.sh exported/ ../GoogleDriveBackup/GooglePhotos/ -v --delete
 ```
+
+6. Kontrollera loggfiler i exported/_logs.
+
+7. Du kan städa bort tgz-källfilerna ur exported/_processed om allt ser bra ut.
+
+8. Även de redundanta kopiorna som ligger i exported/_extracted kan tas bort om allt gått bra.
+
+9. Filerna kommer senare att backupas från GoogleDriveBackup/GooglePhotos till extern destination automatiskt.
+
+Om något gått fel under processen kan du köra om de olika faserna scriptet arbetar i. 
+
+För hjälp, kör `takeout.sh -h`
