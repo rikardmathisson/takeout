@@ -1,0 +1,61 @@
+# Backup av Google Foto
+
+## Vad
+
+Detta är en enkel implementation av en delvis manuell process att hämta hem alla familjens foton från Google Photos till en katalog på NAS där alla bilderna ligger, med rätt fildatum.
+
+Detta kallas av Google själva för Google Takeout och måste beställas via Google-kontot. Tyvärr måste jag be dig googla på hur man gör den inställningen.
+
+Därefter får man mail ett antal ggr per år med en nedladdningslänk (dagen före kommer en förvarning via mail att processen pågår). 
+
+Att ladda ner fotona gör man i bulk, man får dem huller om buller lagrade i ett större antal .tgz-filer. Detta är unix-arkivfiler som du måste processa.
+
+_Målet är att få våra foton läsbara från NAS:en och då vill vi att alla filer har rätt datum!_
+
+Google Takeout skickar med metadatafiler (.json) för varje enskild mediafil, och katalog. Detta är inte möljigt att processa för hand. Dels för att det är över 50k bilder och lika många metadatafiler och del för att det faktiskt inte går att sätta datum manuellt på filer.
+
+Lösningen är att installera det program jag skrivit. Det finns tillgänglig på github vid behov:
+
+`github.com:rikardmathisson/takeout.git`
+
+Scriptet är också lagrat på NAS:/GooglePhotosTakeout/scripts!
+
+Det går bra att köra på mac, men om allt skall fungera bra måste du ha:
+- python version 3
+- rsync version 3 eller senare
+
+
+## Hur
+
+1. Genomför först en komplett export av Google Takeout / Google Foto med din webbläsare, t ex till din lokala downloadmapp.
+
+2. Du får då en lista på filer som ser ut ungefär såhär:
+
+```bash
+takeout-20260213T163706Z-3-001.tgz
+takeout-20260213T163706Z-3-002.tgz
+takeout-20260213T163706Z-3-003.tgz
+takeout-20260213T163706Z-3-004.tgz
+takeout-20260213T163706Z-3-005.tgz
+takeout-20260213T163706Z-3-006.tgz
+takeout-20260213T163706Z-3-007.tgz
+takeout-20260213T163706Z-3-008.tgz
+takeout-20260213T163706Z-3-009.tgz
+takeout-20260213T163706Z-3-010.tgz
+takeout-20260213T163706Z-3-011.tgz
+takeout-20260213T163706Z-3-012.tgz
+takeout-20260213T163706Z-3-013.tgz
+takeout-20260213T163706Z-3-014.tgz
+takeout-20260213T163706Z-3-015.tgz
+takeout-20260213T163706Z-3-016.tgz
+takeout-20260213T163706Z-3-017.tgz
+takeout-20260213T163706Z-3-018.tgz
+takeout-20260213T163706Z-3-019.tgz
+takeout-20260213T163706Z-3-020.tgz
+```
+
+3. Därefter skall dessa processas. Till det behöver vi `takeout.sh`. Se mappen scripts på nas, och kör `takeout.sh -h` om du vill veta mer. 
+
+```bash
+./takeout.sh /Users/rikardmathisson/Downloads/takeout-exported '/Volumes/GooglePhotosTakeout/Takeout/Google Foto' -v
+```
