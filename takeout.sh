@@ -622,21 +622,21 @@ do_sync() {
 
     log "$RSYNC_LOG" "[${n}/${total_sources}] (${pct}%) source=$src"
 
-    RSYNC_OPTS=(-a -v)
+    RSYNC_OPTS=(-a -v --exclude='*.json' --delete-delay)
 
     if [ "$VERBOSE" -eq 1 ]; then
       # Run rsync, log everything, but only show compact "to-check" progress in terminal.
       rsync_tmp="${LOG_DIR}/.rsync_live_${n}.log"
       : > "$rsync_tmp"
 
-      RSYNC_OPTS+=(--progress --delete-delay)
+      RSYNC_OPTS+=(--progress)
       if [ "$DRY_RUN" -eq 1 ]; then
         RSYNC_OPTS+=(--dry-run)
       fi
 
       # Run rsync in background, tee output to both a temp live file and the main log
       (
-        rsync "${RSYNC_OPTS[@]}" "${src}/" "${RSYNC_DEST}/" 2>&1 \
+        script -q /dev/null rsync "${RSYNC_OPTS[@]}" "${src}/" "${RSYNC_DEST}/" 2>&1 \
           | tee -a "$rsync_tmp" >> "$RSYNC_LOG"
       ) &
       rsync_pid=$!
@@ -644,21 +644,42 @@ do_sync() {
       # While rsync runs: show only the latest "(xfer#, to-check=.../...)" line
       last=""
       while kill -0 "$rsync_pid" 2>/dev/null; do
-        line="$(grep -E 'to-check=[0-9]+/[0-9]+' "$rsync_tmp" 2>/dev/null | tail -n 1 || true)"
-        # Extract "to-check=.../..." from the rsync progress line
-        tocheck="$(printf "%s" "$line" | sed -n 's/.*to-check=\([^)]*\)).*/\1/p')"
-        if [ -n "$tocheck" ]; then
-          progress_line "[sync] ${n}/${total_sources} (${pct}%) progress ${tocheck}"
+        # Read a small rolling window and pick the last progress-like line from it
+        window="$(tail -n 200 "$rsync_tmp" 2>/dev/null | tr '\r' '\n')"
+
+        line="$(printf "%s\n" "$window" \
+          | grep -E '(to-(check|chk)|ir-chk)=[0-9]+/[0-9]+' \
+          | tail -n 1 || true)"
+
+        # prog="$(printf "%s" "$line" | sed -n 's/.*\(ir-chk\|to-chk\|to-check\)=\([0-9]\+\/[0-9]\+\).*/\2/p')"
+        prog="$(
+          printf "%s" "$line" \
+          | grep -Eo '(ir-chk|to-chk|to-check)=[0-9]+/[0-9]+' \
+          | tail -n 1 \
+          | cut -d= -f2 \
+          || true
+        )"
+        
+        if [ -n "$prog" ]; then
+          cur="${prog%/*}"
+          tot="${prog#*/}"
+
+          if [ "$tot" -gt 0 ] 2>/dev/null; then
+            pct2=$(( (tot - cur) * 100 / tot ))
+            progress_line "[sync] ${n}/${total_sources} (${pct2}%) running..."
+          else
+            progress_line "[sync] ${n}/${total_sources} running..."
+          fi
         else
-          progress_line "[sync] ${n}/${total_sources} (${pct}%) running..."
+          progress_line "[sync] ${n}/${total_sources} running..."
         fi
+
         sleep 1
       done
 
       wait "$rsync_pid"
       progress_done_line "[sync] ${n}/${total_sources} (${pct}%) done"
     else
-      RSYNC_OPTS+=(--delete-delay)
       rsync "${RSYNC_OPTS[@]}" "${src}/" "${RSYNC_DEST}/" >> "$RSYNC_LOG" 2>&1
     fi
   done <<< "$sources"

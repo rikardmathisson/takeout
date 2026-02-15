@@ -1,5 +1,19 @@
 # takeout.sh
 
+**NOTE**: This readme is incomplete
+
+## Remarks
+- rsync version 3 or later is required,
+
+```bash
+/usr/local/bin/rsync --version   # Intel
+/opt/homebrew/bin/rsync --version # Apple Silicon
+```
+
+
+## CLI
+
+```
 Usage:
   takeout.sh <DOWNLOAD_DIR> <RSYNC_DEST> [options]
 
@@ -23,3 +37,4 @@ Behavior:
   - All archives are extracted (OVERLAID) into a single EXTRACT_BASE tree so sidecar JSON can land next to media.
   - Sidecar metadata applied ONLY when JSON safely maps: "<file>.<ext>.json" -> "<file>.<ext>".
   - Folder mtime set when a folder contains "metadata.json" (applies to the folder itself).
+```
