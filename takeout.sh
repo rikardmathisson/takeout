@@ -23,21 +23,13 @@ Options:
   --log-dir <path>         Override log directory (default: <DOWNLOAD_DIR>/_logs/<timestamp>)
   --cleanup-extracted      Remove extracted data after successful run
   --keep-archives          Do not move processed archives to <DOWNLOAD_DIR>/_processed
-  --photos-root <name>     Override photos root folder name (default: auto: "Google Foto" and "Google Photos")
+  --photos-root <name>     Override Photos root folder name under Takeout (default: auto: "Google Foto" and "Google Photos")
+  --reset                  Remove extracted data + markers before running (forces re-extract and reprocess)
 
-Logs (created per run):
-  00_runinfo.log
-  00_prescan.log
-  01_extract.log
-  02_mtime_files.log
-  03_mtime_dirs.log
-  04_rsync.log
-  90_unmatched.log     (missing/failed metadata matches + no-sidecar media list)
-  99_summary.log
-
-Notes:
-  - Sidecar metadata is applied ONLY when JSON safely maps to a media file: "<file>.<ext>.json" -> "<file>.<ext>".
-  - Folder mtime is set when a folder contains "metadata.json" (applies to the folder itself).
+Behavior:
+  - All archives are extracted (OVERLAID) into a single EXTRACT_BASE tree so sidecar JSON can land next to media.
+  - Sidecar metadata applied ONLY when JSON safely maps: "<file>.<ext>.json" -> "<file>.<ext>".
+  - Folder mtime set when a folder contains "metadata.json" (applies to the folder itself).
 EOF
 }
 
@@ -45,28 +37,9 @@ EOF
 # TERMINAL PROGRESS (verbose only)
 ###############################################################################
 VERBOSE=0
-
-progress_line() {
-  # Updates the same terminal line (verbose only)
-  # Usage: progress_line "[phase] message..."
-  if [ "$VERBOSE" -eq 1 ]; then
-    printf "\r\033[K%s" "$*"
-  fi
-}
-
-progress_done_line() {
-  # Finalize the current line (verbose only)
-  # Usage: progress_done_line "[phase] done message"
-  if [ "$VERBOSE" -eq 1 ]; then
-    printf "\r\033[K%s\n" "$*"
-  fi
-}
-
-say() {
-  # Normal terminal output (kept minimal)
-  # Usage: say "text"
-  echo "$*"
-}
+progress_line() { [ "$VERBOSE" -eq 1 ] && printf "\r\033[K%s" "$*"; }
+progress_done_line() { [ "$VERBOSE" -eq 1 ] && printf "\r\033[K%s\n" "$*"; }
+say() { echo "$*"; }
 
 ###############################################################################
 # ARG PARSING (supports -h before positionals)
@@ -75,6 +48,7 @@ PHASE="all"
 DRY_RUN=0
 CLEANUP_EXTRACTED=0
 KEEP_ARCHIVES=0
+RESET=0
 LOG_DIR=""
 PHOTOS_ROOT_OVERRIDE=""
 
@@ -82,52 +56,18 @@ POSITIONALS=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    -h|--help)
-      show_help
-      exit 0
-      ;;
-    -v|--verbose)
-      VERBOSE=1
-      ;;
-    -n|--dry-run)
-      DRY_RUN=1
-      ;;
-    --cleanup-extracted)
-      CLEANUP_EXTRACTED=1
-      ;;
-    --keep-archives)
-      KEEP_ARCHIVES=1
-      ;;
-    --log-dir)
-      shift
-      [ $# -gt 0 ] || { echo "ERROR: --log-dir requires a value"; exit 1; }
-      LOG_DIR="$1"
-      ;;
-    --phase)
-      shift
-      [ $# -gt 0 ] || { echo "ERROR: --phase requires a value"; exit 1; }
-      PHASE="$1"
-      ;;
-    --photos-root)
-      shift
-      [ $# -gt 0 ] || { echo "ERROR: --photos-root requires a value"; exit 1; }
-      PHOTOS_ROOT_OVERRIDE="$1"
-      ;;
-    --)
-      shift
-      while [ $# -gt 0 ]; do
-        POSITIONALS+=( "$1" )
-        shift
-      done
-      break
-      ;;
-    -*)
-      echo "ERROR: Unknown option: $1"
-      exit 1
-      ;;
-    *)
-      POSITIONALS+=( "$1" )
-      ;;
+    -h|--help) show_help; exit 0 ;;
+    -v|--verbose) VERBOSE=1 ;;
+    -n|--dry-run) DRY_RUN=1 ;;
+    --cleanup-extracted) CLEANUP_EXTRACTED=1 ;;
+    --keep-archives) KEEP_ARCHIVES=1 ;;
+    --reset) RESET=1 ;;
+    --log-dir) shift; [ $# -gt 0 ] || { echo "ERROR: --log-dir requires a value"; exit 1; }; LOG_DIR="$1" ;;
+    --phase) shift; [ $# -gt 0 ] || { echo "ERROR: --phase requires a value"; exit 1; }; PHASE="$1" ;;
+    --photos-root) shift; [ $# -gt 0 ] || { echo "ERROR: --photos-root requires a value"; exit 1; }; PHOTOS_ROOT_OVERRIDE="$1" ;;
+    --) shift; while [ $# -gt 0 ]; do POSITIONALS+=( "$1" ); shift; done; break ;;
+    -*) echo "ERROR: Unknown option: $1"; exit 1 ;;
+    *) POSITIONALS+=( "$1" ) ;;
   esac
   shift
 done
@@ -147,13 +87,14 @@ RSYNC_DEST="${POSITIONALS[1]}"
 ###############################################################################
 EXTRACT_BASE="${DOWNLOAD_DIR}/_extracted"
 PROCESSED_DIR="${DOWNLOAD_DIR}/_processed"
+MARKER_DIR="${EXTRACT_BASE}/.markers"
 
 TIMESTAMP="$(date +"%Y%m%d-%H%M%S")"
 if [ -z "$LOG_DIR" ]; then
   LOG_DIR="${DOWNLOAD_DIR}/_logs/${TIMESTAMP}"
 fi
 
-mkdir -p "$LOG_DIR" "$EXTRACT_BASE" "$PROCESSED_DIR" "$RSYNC_DEST"
+mkdir -p "$LOG_DIR" "$PROCESSED_DIR" "$RSYNC_DEST"
 
 RUNINFO_LOG="${LOG_DIR}/00_runinfo.log"
 PRESCAN_LOG="${LOG_DIR}/00_prescan.log"
@@ -164,7 +105,6 @@ RSYNC_LOG="${LOG_DIR}/04_rsync.log"
 UNMATCHED_LOG="${LOG_DIR}/90_unmatched.log"
 SUMMARY_LOG="${LOG_DIR}/99_summary.log"
 
-# Truncate logs
 : > "$RUNINFO_LOG"
 : > "$PRESCAN_LOG"
 : > "$EXTRACT_LOG"
@@ -177,30 +117,36 @@ SUMMARY_LOG="${LOG_DIR}/99_summary.log"
 ###############################################################################
 # LOGGING HELPERS
 ###############################################################################
-log() {
-  local file="$1"; shift
-  echo "$(date '+%F %T') | $*" >> "$file"
-}
-
+log() { local file="$1"; shift; echo "$(date '+%F %T') | $*" >> "$file"; }
 phase_start() { log "$RUNINFO_LOG" "PHASE START: $1"; }
 phase_end()   { log "$RUNINFO_LOG" "PHASE END:   $1"; }
 
 ###############################################################################
 # REQUIREMENTS
 ###############################################################################
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo "ERROR: Missing command: $1"
-    exit 1
-  }
-}
-
+need_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: Missing command: $1"; exit 1; }; }
 need_cmd tar
 need_cmd rsync
 need_cmd python3
 need_cmd find
 need_cmd wc
 need_cmd date
+need_cmd rm
+need_cmd mkdir
+
+###############################################################################
+# RESET (must happen before creating EXTRACT_BASE/MARKER_DIR)
+###############################################################################
+if [ "$RESET" -eq 1 ]; then
+  # In verbose mode, show a short line
+  progress_line "[reset] removing extracted data..."
+  # Remove the whole extract base if present (includes markers)
+  rm -rf "$EXTRACT_BASE" 2>/dev/null || true
+  progress_done_line "[reset] done"
+fi
+
+# Ensure extraction directories exist after reset
+mkdir -p "$EXTRACT_BASE" "$MARKER_DIR"
 
 ###############################################################################
 # RUNINFO
@@ -210,12 +156,14 @@ log "$RUNINFO_LOG" "DOWNLOAD_DIR=$DOWNLOAD_DIR"
 log "$RUNINFO_LOG" "RSYNC_DEST=$RSYNC_DEST"
 log "$RUNINFO_LOG" "EXTRACT_BASE=$EXTRACT_BASE"
 log "$RUNINFO_LOG" "PROCESSED_DIR=$PROCESSED_DIR"
+log "$RUNINFO_LOG" "MARKER_DIR=$MARKER_DIR"
 log "$RUNINFO_LOG" "LOG_DIR=$LOG_DIR"
 log "$RUNINFO_LOG" "PHASE=$PHASE"
 log "$RUNINFO_LOG" "VERBOSE=$VERBOSE"
 log "$RUNINFO_LOG" "DRY_RUN=$DRY_RUN"
 log "$RUNINFO_LOG" "CLEANUP_EXTRACTED=$CLEANUP_EXTRACTED"
 log "$RUNINFO_LOG" "KEEP_ARCHIVES=$KEEP_ARCHIVES"
+log "$RUNINFO_LOG" "RESET=$RESET"
 log "$RUNINFO_LOG" "PHOTOS_ROOT_OVERRIDE=${PHOTOS_ROOT_OVERRIDE:-<auto>}"
 
 ###############################################################################
@@ -226,10 +174,9 @@ SIDECAR_JSON_COUNT=0
 DIR_METADATA_COUNT=0
 SYNC_SOURCE_COUNT=0
 MEDIA_FILE_COUNT=0
-MEDIA_NO_SIDECAR_COUNT=0
 
 ###############################################################################
-# STEP: EXTRACT
+# STEP: EXTRACT (OVERLAY into EXTRACT_BASE)
 ###############################################################################
 do_extract() {
   phase_start "extract"
@@ -247,6 +194,7 @@ do_extract() {
   local total="${#archives[@]}"
   ARCHIVE_COUNT="$total"
   log "$EXTRACT_LOG" "ARCHIVES_FOUND=$total"
+  log "$EXTRACT_LOG" "MODE=OVERLAY_INTO_EXTRACT_BASE"
 
   if [ "$total" -eq 0 ]; then
     progress_done_line "[extract] no archives found"
@@ -258,26 +206,22 @@ do_extract() {
   for archive in "${archives[@]}"; do
     i=$((i+1))
     local pct=$(( i * 100 / total ))
+    local base marker
 
-    progress_line "[extract] ${i}/${total} (${pct}%) $(basename "$archive")"
+    base="$(basename "$archive")"
+    marker="${MARKER_DIR}/${base}.ok"
+
+    progress_line "[extract] ${i}/${total} (${pct}%) ${base}"
     log "$EXTRACT_LOG" "[${i}/${total}] (${pct}%) archive=$archive"
 
-    local base stamp outdir marker
-    base="$(basename "$archive")"
-    stamp="${base%.tar.gz}"
-    stamp="${stamp%.tgz}"
-    outdir="${EXTRACT_BASE}/${stamp}"
-    marker="${outdir}/.extracted.ok"
-
     if [ -f "$marker" ]; then
-      log "$EXTRACT_LOG" "  SKIP already extracted outdir=$outdir"
+      log "$EXTRACT_LOG" "  SKIP already extracted marker=$marker"
       continue
     fi
 
-    mkdir -p "$outdir"
-    if tar -xzf "$archive" -C "$outdir" >> "$EXTRACT_LOG" 2>&1; then
+    if tar -xzf "$archive" -C "$EXTRACT_BASE" >> "$EXTRACT_LOG" 2>&1; then
       touch "$marker"
-      log "$EXTRACT_LOG" "  OK extracted outdir=$outdir"
+      log "$EXTRACT_LOG" "  OK extracted into EXTRACT_BASE=$EXTRACT_BASE"
     else
       log "$EXTRACT_LOG" "  ERROR extracting archive=$archive"
       progress_done_line "[extract] ERROR (see log)"
@@ -296,7 +240,6 @@ do_prescan() {
   phase_start "prescan"
   progress_line "[prescan] scanning extracted tree..."
 
-  # Sidecar json (safe patterns)
   SIDECAR_JSON_COUNT="$(
     find "$EXTRACT_BASE" -type f \( \
       -iname "*.jpg.json" -o -iname "*.jpeg.json" -o -iname "*.png.json" -o \
@@ -306,12 +249,10 @@ do_prescan() {
     \) -print 2>/dev/null | wc -l | tr -d ' '
   )"
 
-  # Folder metadata.json
   DIR_METADATA_COUNT="$(
     find "$EXTRACT_BASE" -type f -name "metadata.json" -print 2>/dev/null | wc -l | tr -d ' '
   )"
 
-  # Sync roots (either override or auto)
   if [ -n "$PHOTOS_ROOT_OVERRIDE" ]; then
     SYNC_SOURCE_COUNT="$(
       find "$EXTRACT_BASE" -type d -path "*/Takeout/${PHOTOS_ROOT_OVERRIDE}" -print 2>/dev/null | wc -l | tr -d ' '
@@ -325,7 +266,6 @@ do_prescan() {
     )"
   fi
 
-  # Media files total (for “no sidecar” reporting)
   MEDIA_FILE_COUNT="$(
     find "$EXTRACT_BASE" -type f \( \
       -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" -o -iname "*.heic" -o \
@@ -359,14 +299,13 @@ do_prescan() {
 do_mtime_files() {
   phase_start "mtime-files"
 
-  if [ "$SIDECAR_JSON_COUNT" -eq 0 ] && [ "$MEDIA_FILE_COUNT" -eq 0 ]; then
+  if [ "$MEDIA_FILE_COUNT" -eq 0 ]; then
     log "$MTIME_FILE_LOG" "INFO: No media files found under EXTRACT_BASE."
     progress_done_line "[mtime-files] skipped (no media files)"
     phase_end "mtime-files"
     return 0
   fi
 
-  # Even if SIDECAR_JSON_COUNT=0, we still run the “no-sidecar scan” for media files
   EXTRACT_BASE="$EXTRACT_BASE" \
   MTIME_FILE_LOG="$MTIME_FILE_LOG" \
   UNMATCHED_LOG="$UNMATCHED_LOG" \
@@ -426,9 +365,7 @@ def pick_timestamp(meta):
                     pass
     return None
 
-###############################################################################
 # A) Update mtimes for files based on safe sidecar JSON
-###############################################################################
 if total_sidecar == 0:
     log("INFO: No sidecar JSON files found (safe patterns). File mtimes will not be updated from sidecars.")
 else:
@@ -441,7 +378,6 @@ bad_json = 0
 no_timestamp = 0
 utime_failed = 0
 
-# Progress cadence (aim ~1% for sidecar json)
 if total_sidecar > 0:
     step_json = max(100, total_sidecar // 100)
 else:
@@ -485,17 +421,13 @@ for root, _, files in os.walk(extract_base):
         if processed_json % step_json == 0:
             if total_sidecar > 0:
                 pct = int(processed_json * 100 / total_sidecar)
-                if pct > 100:
-                    pct = 100
+                if pct > 100: pct = 100
                 progress_line(f"[mtime-files:sidecars] {processed_json}/{total_sidecar} ({pct}%) updated={updated}")
             else:
                 progress_line(f"[mtime-files:sidecars] processed={processed_json} updated={updated}")
 
 if total_sidecar > 0:
     progress_done(f"[mtime-files:sidecars] done updated={updated} (see logs)")
-else:
-    # Don't print "done" line if there was nothing; operator will see the later no-sidecar scan progress
-    pass
 
 log(f"SIDECAR_JSON_PROCESSED={processed_json}")
 log(f"UPDATED_FILES_FROM_SIDECAR={updated}")
@@ -504,13 +436,10 @@ log(f"BAD_JSON={bad_json}")
 log(f"NO_TIMESTAMP={no_timestamp}")
 log(f"UTIME_FAILED={utime_failed}")
 
-###############################################################################
-# B) Report media files that have NO sidecar JSON (safe expectation: <media>.<ext>.json)
-###############################################################################
+# B) Report media files that have NO sidecar JSON (expected: <media>.<ext>.json)
 media_seen = 0
 media_no_sidecar = 0
 
-# Progress cadence (aim ~1% for media scan)
 if total_media > 0:
     step_media = max(500, total_media // 100)
 else:
@@ -528,14 +457,12 @@ for root, _, files in os.walk(extract_base):
 
         if not os.path.exists(sidecar_path):
             media_no_sidecar += 1
-            # This can be large; user explicitly requested it.
             unmatch(f"NO_SIDECAR media={media_path} expected_sidecar={sidecar_path}")
 
         if media_seen % step_media == 0:
             if total_media > 0:
                 pct = int(media_seen * 100 / total_media)
-                if pct > 100:
-                    pct = 100
+                if pct > 100: pct = 100
                 progress_line(f"[mtime-files:nosidecar] {media_seen}/{total_media} ({pct}%) no_sidecar={media_no_sidecar}")
             else:
                 progress_line(f"[mtime-files:nosidecar] scanned={media_seen} no_sidecar={media_no_sidecar}")
@@ -545,15 +472,6 @@ progress_done(f"[mtime-files:nosidecar] done scanned={media_seen} no_sidecar={me
 log(f"MEDIA_FILES_SCANNED={media_seen}")
 log(f"MEDIA_FILES_NO_SIDECAR={media_no_sidecar}")
 PY
-
-  # Read back the no-sidecar count for summary (lightweight parse)
-  # We’ll compute count via grep (works on macOS + QTS); if grep missing, ignore.
-  if command -v grep >/dev/null 2>&1; then
-    MEDIA_NO_SIDECAR_COUNT="$(grep -c "MEDIA_FILES_NO_SIDECAR=" "$MTIME_FILE_LOG" 2>/dev/null | tr -d ' ')"
-    # That grep gives number of matching lines, not the value; keep summary from the log file instead.
-    # We'll just record a note here; the exact value is in MTIME_FILE_LOG.
-    :
-  fi
 
   phase_end "mtime-files"
 }
@@ -659,13 +577,12 @@ for root, _, files in os.walk(extract_base):
     if processed % step == 0:
         if total > 0:
             pct = int(processed * 100 / total)
-            if pct > 100:
-                pct = 100
+            if pct > 100: pct = 100
             progress_line(f"[mtime-dirs] {processed}/{total} ({pct}%) updated={updated}")
         else:
             progress_line(f"[mtime-dirs] processed={processed} updated={updated}")
 
-progress_done(f"[mtime-dirs] done {processed}/{total if total else processed} updated={updated}")
+progress_done(f"[mtime-dirs] done processed={processed} updated={updated}")
 
 log(f"DIR_METADATA_PROCESSED={processed}")
 log(f"UPDATED_DIRS={updated}")
@@ -682,7 +599,6 @@ PY
 ###############################################################################
 do_sync() {
   phase_start "sync"
-
   progress_line "[sync] locating sources..."
 
   local sources=""
@@ -750,30 +666,11 @@ move_archives() {
 # MAIN DISPATCH
 ###############################################################################
 case "$PHASE" in
-  extract)
-    do_extract
-    ;;
-  prescan)
-    do_prescan
-    ;;
-  mtime)
-    # For mtime we need prescan counts (and usually extraction already done)
-    do_prescan
-    do_mtime_files
-    do_mtime_dirs
-    ;;
-  sync)
-    # Prescan helps sync progress; not strictly required but useful
-    do_prescan
-    do_sync
-    ;;
-  all)
-    do_extract
-    do_prescan
-    do_mtime_files
-    do_mtime_dirs
-    do_sync
-    ;;
+  extract) do_extract ;;
+  prescan) do_prescan ;;
+  mtime) do_prescan; do_mtime_files; do_mtime_dirs ;;
+  sync) do_prescan; do_sync ;;
+  all) do_extract; do_prescan; do_mtime_files; do_mtime_dirs; do_sync ;;
   *)
     echo "ERROR: Invalid --phase value: $PHASE"
     echo "Allowed: extract | prescan | mtime | sync | all"
@@ -791,5 +688,4 @@ fi
 log "$SUMMARY_LOG" "FINISHED at $(date)"
 log "$SUMMARY_LOG" "LOG_DIR=$LOG_DIR"
 
-# Terminal final output (always)
 say "Logs: $LOG_DIR"
