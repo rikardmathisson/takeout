@@ -607,18 +607,41 @@ do_sync() {
 
     log "$RSYNC_LOG" "[${n}/${total_sources}] (${pct}%) source=$src"
 
-    RSYNC_OPTS=(-a -v)
     if [ "$VERBOSE" -eq 1 ]; then
-      RSYNC_OPTS+=(--progress)
-    fi
+      # Run rsync, log everything, but only show compact "to-check" progress in terminal.
+      rsync_tmp="${LOG_DIR}/.rsync_live_${n}.log"
+      : > "$rsync_tmp"
 
-    if [ "$DRY_RUN" -eq 1 ]; then
-      RSYNC_OPTS+=(--dry-run)
-    fi
+      RSYNC_OPTS=(-a -v --progress)
+      if [ "$DRY_RUN" -eq 1 ]; then
+        RSYNC_OPTS+=(--dry-run)
+      fi
 
-    if [ "$VERBOSE" -eq 1 ]; then
-      rsync "${RSYNC_OPTS[@]}" "${src}/" "${RSYNC_DEST}/" 2>&1 | tee -a "$RSYNC_LOG"
+      # Run rsync in background, tee output to both a temp live file and the main log
+      (
+        rsync "${RSYNC_OPTS[@]}" "${src}/" "${RSYNC_DEST}/" 2>&1 \
+          | tee -a "$rsync_tmp" >> "$RSYNC_LOG"
+      ) &
+      rsync_pid=$!
+
+      # While rsync runs: show only the latest "(xfer#, to-check=.../...)" line
+      last=""
+      while kill -0 "$rsync_pid" 2>/dev/null; do
+        line="$(grep -E 'to-check=[0-9]+/[0-9]+' "$rsync_tmp" 2>/dev/null | tail -n 1 || true)"
+        # Extract "to-check=.../..." from the rsync progress line
+        tocheck="$(printf "%s" "$line" | sed -n 's/.*to-check=\([^)]*\)).*/\1/p')"
+        if [ -n "$tocheck" ]; then
+          progress_line "[sync] ${n}/${total_sources} (${pct}%) progress ${tocheck}"
+        else
+          progress_line "[sync] ${n}/${total_sources} (${pct}%) running..."
+        fi
+        sleep 1
+      done
+
+      wait "$rsync_pid"
+      progress_done_line "[sync] ${n}/${total_sources} (${pct}%) done"
     else
+      RSYNC_OPTS=(-a -v)
       rsync "${RSYNC_OPTS[@]}" "${src}/" "${RSYNC_DEST}/" >> "$RSYNC_LOG" 2>&1
     fi
   done <<< "$sources"
