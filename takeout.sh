@@ -346,16 +346,18 @@ def progress_done(msg):
     sys.stdout.write("\r\033[K" + msg + "\n")
     sys.stdout.flush()
 
-def pick_timestamp(meta):
-    for key in ("photoTakenTime","creationTime"):
+def pick_timestamp(meta: dict):
+    # Accept common Takeout timestamp keys
+    for key in ("photoTakenTime", "creationTime", "date"):
         obj = meta.get(key)
-        if isinstance(obj,dict):
+        if isinstance(obj, dict):
             ts = obj.get("timestamp")
-            if ts:
-                try:
-                    return int(ts)
-                except:
-                    pass
+            if ts is None:
+                continue
+            try:
+                return int(ts)
+            except Exception:
+                pass
     return None
 
 def first_json_with_prefix(dirname: str, prefix: str):
@@ -376,7 +378,7 @@ utime_failed = 0
 
 step = max(500, total_media // 100) if total_media > 0 else 2000
 
-for root, _, files in os.walk(extract_base):
+for root, _, files in os.walk(extract_base, topdown=False):
     for fn in files:
         lfn = fn.lower()
         if not lfn.endswith(MEDIA_SUFFIXES):
@@ -398,6 +400,17 @@ for root, _, files in os.walk(extract_base):
         # 2) "<basename_without_ext><anything>.json"
         if not json_path:
             json_path = first_json_with_prefix(dirname, base_no_ext)
+
+        # 2b) Duplicate strategy (2020+):
+        # "EFFECTS(1).jpg" may have JSON like "EFFECTS.jpg.supplemental-metadata(1).json"
+        if not json_path:
+            # Detect "(number)" suffix in base filename
+            import re
+            m = re.match(r"^(.*)\((\d+)\)$", base_no_ext)
+            if m:
+                original_base = m.group(1)
+                # Try prefix "<original_base><ext>" e.g. "EFFECTS.jpg"
+                json_path = first_json_with_prefix(dirname, original_base + ext)
 
         # 3) MP4/MOV -> try HEIC
         if not json_path and ext_lower in (".mp4", ".mov"):
@@ -498,16 +511,18 @@ def progress_done(msg):
     sys.stdout.write("\r\033[K" + msg + "\n")
     sys.stdout.flush()
 
-def pick_timestamp(meta):
-    for key in ("photoTakenTime","creationTime"):
+def pick_timestamp(meta: dict):
+    # Accept common Takeout timestamp keys
+    for key in ("photoTakenTime", "creationTime", "date"):
         obj = meta.get(key)
-        if isinstance(obj,dict):
+        if isinstance(obj, dict):
             ts = obj.get("timestamp")
-            if ts:
-                try:
-                    return int(ts)
-                except:
-                    pass
+            if ts is None:
+                continue
+            try:
+                return int(ts)
+            except Exception:
+                pass
     return None
 
 processed = 0
@@ -518,7 +533,7 @@ utime_failed = 0
 
 step = max(50, total // 100) if total > 0 else 200
 
-for root, _, files in os.walk(extract_base):
+for root, _, files in os.walk(extract_base, topdown=False):
     if "metadata.json" not in files:
         continue
 
@@ -607,12 +622,14 @@ do_sync() {
 
     log "$RSYNC_LOG" "[${n}/${total_sources}] (${pct}%) source=$src"
 
+    RSYNC_OPTS=(-a -v)
+
     if [ "$VERBOSE" -eq 1 ]; then
       # Run rsync, log everything, but only show compact "to-check" progress in terminal.
       rsync_tmp="${LOG_DIR}/.rsync_live_${n}.log"
       : > "$rsync_tmp"
 
-      RSYNC_OPTS=(-a -v --progress)
+      RSYNC_OPTS+=(--progress --delete-delay)
       if [ "$DRY_RUN" -eq 1 ]; then
         RSYNC_OPTS+=(--dry-run)
       fi
@@ -641,7 +658,7 @@ do_sync() {
       wait "$rsync_pid"
       progress_done_line "[sync] ${n}/${total_sources} (${pct}%) done"
     else
-      RSYNC_OPTS=(-a -v)
+      RSYNC_OPTS+=(--delete-delay)
       rsync "${RSYNC_OPTS[@]}" "${src}/" "${RSYNC_DEST}/" >> "$RSYNC_LOG" 2>&1
     fi
   done <<< "$sources"
